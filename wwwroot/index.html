@@ -1,22 +1,649 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <meta charset="utf-8" />
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    <title>C++ Web Server</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PayCore — Payment Engine Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --surface: #131a26;
+      --surface-2: #1a2333;
+      --border: #263248;
+      --text: #e6edf3;
+      --muted: #8b9bb4;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --green: #10b981;
+      --green-bg: rgba(16, 185, 129, 0.14);
+      --amber: #f59e0b;
+      --amber-bg: rgba(245, 158, 11, 0.14);
+      --red: #ef4444;
+      --red-bg: rgba(239, 68, 68, 0.14);
+      --purple: #a855f7;
+      --purple-bg: rgba(168, 85, 247, 0.14);
+      --mono: "Cascadia Code", "Consolas", ui-monospace, monospace;
+      --sans: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      letter-spacing: -0.02em;
+    }
+
+    .brand .sub {
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .controls label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    input, select, button {
+      font-family: inherit;
+      font-size: 0.875rem;
+    }
+
+    input[type="text"], input[type="number"], select {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 10px;
+      outline: none;
+    }
+
+    input:focus-visible, select:focus-visible, button:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    button {
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+      padding: 7px 12px;
+      border-radius: 6px;
+      font-weight: 500;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+
+    button:hover { background: #222e42; }
+
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    button.primary:hover { background: var(--accent-hover); }
+
+    button.sm {
+      padding: 4px 9px;
+      font-size: 0.78rem;
+    }
+
+    button.success { border-color: var(--green); color: var(--green); }
+    button.success:hover { background: var(--green-bg); }
+    button.danger { border-color: var(--red); color: var(--red); }
+    button.danger:hover { background: var(--red-bg); }
+    button.warn { border-color: var(--amber); color: var(--amber); }
+    button.warn:hover { background: var(--amber-bg); }
+
+    main {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 20px 24px 48px;
+      display: grid;
+      gap: 20px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 20px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px;
+    }
+
+    .card h2 {
+      margin: 0 0 14px 0;
+      font-size: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      font-family: var(--mono);
+    }
+
+    .b-green  { background: var(--green-bg);  color: var(--green); }
+    .b-amber  { background: var(--amber-bg);  color: var(--amber); }
+    .b-red    { background: var(--red-bg);    color: var(--red); }
+    .b-purple { background: var(--purple-bg); color: var(--purple); }
+    .b-blue   { background: rgba(59,130,246,0.16); color: #60a5fa; }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .field label {
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+
+    .inline-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    .inline-row input { flex: 1; min-width: 0; }
+
+    .accounts-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .account-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+    }
+
+    .account-name {
+      font-family: var(--mono);
+      font-size: 0.88rem;
+    }
+
+    .account-bal {
+      font-family: var(--mono);
+      font-weight: 600;
+      font-size: 1rem;
+    }
+
+    .account-paise {
+      color: var(--muted);
+      font-size: 0.75rem;
+      display: block;
+      text-align: right;
+    }
+
+    .audit-stats {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .stat-box {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+
+    .stat-box .k { font-size: 0.75rem; color: var(--muted); }
+    .stat-box .v { font-size: 1.25rem; font-weight: 700; font-family: var(--mono); }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .mono { font-family: var(--mono); font-size: 0.8rem; }
+
+    pre.log {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin: 12px 0 0 0;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      max-height: 180px;
+      overflow: auto;
+      white-space: pre-wrap;
+      color: #c9d1d9;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 0.85rem;
+      padding: 12px 0;
+    }
+
+    .history-list {
+      margin: 6px 0 0 0;
+      padding-left: 16px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.74rem;
+    }
+  </style>
 </head>
 <body>
-    <H1>Hello, world!</H1>
-    <ul>
-        <li>This</li>
-        <li>is</li>
-        <li>a
-        </li>
-        <li>
-            List!
-        </li>
-    </ul>
-    <iframe src="foo.html"></iframe>
+  <header>
+    <div class="brand">
+      <div>
+        <h1>PayCore <span id="serverStatus" class="badge b-amber">checking...</span></h1>
+        <div class="sub">Raw C++ Winsock2 HTTP/1.1 &bull; Double-Entry Ledger &bull; Atomic Persistence</div>
+      </div>
+    </div>
+    <div class="controls">
+      <label>
+        X-Api-Key
+        <input type="text" id="apiKey" value="pk_test_paycore_123" style="width: 180px;">
+      </label>
+      <button id="refreshBtn" class="primary">Refresh All</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Top Row: Create Payment + Balances + Reconciliation -->
+    <div class="grid-2">
+      <section class="card">
+        <h2>
+          <span>Create Payment <span class="mono" style="color:var(--muted);font-weight:400;">POST /payments</span></span>
+        </h2>
+        <form id="createForm">
+          <div class="form-grid">
+            <div class="field">
+              <label for="amountInr">Amount (INR &#8377;)</label>
+              <input type="number" id="amountInr" value="100" min="1" step="0.01" required>
+            </div>
+            <div class="field">
+              <label for="description">Description</label>
+              <input type="text" id="description" value="Coffee order">
+            </div>
+            <div class="field">
+              <label for="idemKey">Idempotency-Key</label>
+              <div class="inline-row">
+                <input type="text" id="idemKey" required>
+                <button type="button" id="newIdemBtn" title="Generate new key">New</button>
+              </div>
+            </div>
+            <div class="field">
+              <label for="mockAction">Bank Simulator (X-Mock-Action)</label>
+              <select id="mockAction">
+                <option value="">Approve (normal)</option>
+                <option value="decline">decline (402)</option>
+                <option value="insufficient_funds">insufficient_funds (402)</option>
+                <option value="fraud">fraud (402)</option>
+                <option value="timeout">timeout (504)</option>
+                <option value="network_error">network_error (502)</option>
+                <option value="delay">delay (500ms + approve)</option>
+              </select>
+            </div>
+          </div>
+          <button type="submit" class="primary">Send Payment Request</button>
+        </form>
+        <pre id="apiLog" class="log">Ready. Click "Send Payment Request" to test POST /payments (click twice with the same Idempotency-Key to test deduplication).</pre>
+      </section>
+
+      <div style="display:grid; gap:20px; align-content:start;">
+        <section class="card">
+          <h2>
+            <span>Account Balances</span>
+            <span class="mono" style="color:var(--muted);font-weight:400;">GET /accounts</span>
+          </h2>
+          <div id="accountsBox" class="accounts-list">
+            <div class="empty">No ledger accounts yet. Capture a payment to see double-entry balances.</div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>
+            <span>Financial Reconciliation</span>
+            <span id="reconBadge" class="badge b-amber">pending</span>
+          </h2>
+          <div class="audit-stats">
+            <div class="stat-box">
+              <div class="k">Payments Audited</div>
+              <div class="v" id="reconPayments">0</div>
+            </div>
+            <div class="stat-box">
+              <div class="k">Ledger Entries Audited</div>
+              <div class="v" id="reconEntries">0</div>
+            </div>
+          </div>
+          <div id="reconDetails" class="mono" style="color:var(--muted);"></div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Payments Table -->
+    <section class="card">
+      <h2>
+        <span>Payments</span>
+        <span class="mono" style="color:var(--muted);font-weight:400;">GET /payments</span>
+      </h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Payment ID</th>
+              <th>Idempotency Key</th>
+              <th>Amount</th>
+              <th>Description</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="paymentsBody">
+            <tr><td colspan="6" class="empty">No payments yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Double-Entry Ledger Table -->
+    <section class="card">
+      <h2>
+        <span>Double-Entry Ledger Journal (Immutable)</span>
+        <span class="mono" style="color:var(--muted);font-weight:400;">GET /ledger</span>
+      </h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Entry ID</th>
+              <th>Txn ID</th>
+              <th>Account</th>
+              <th>Type</th>
+              <th>Amount</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody id="ledgerBody">
+            <tr><td colspan="6" class="empty">No ledger entries yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function newIdemKey() {
+      return "order_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6);
+    }
+
+    function formatInr(paise) {
+      const sign = paise < 0 ? "-" : "";
+      const abs = Math.abs(paise);
+      return sign + "\u20B9" + (abs / 100).toFixed(2);
+    }
+
+    function esc(str) {
+      const d = document.createElement("div");
+      d.textContent = str ?? "";
+      return d.innerHTML;
+    }
+
+    function statusBadge(status) {
+      const map = {
+        AUTHORIZED: "b-blue",
+        CAPTURED:   "b-green",
+        SETTLED:    "b-green",
+        REFUNDED:   "b-purple",
+        CANCELLED:  "b-amber",
+        FAILED:     "b-red"
+      };
+      const cls = map[status] || "b-amber";
+      return `<span class="badge ${cls}">${esc(status)}</span>`;
+    }
+
+    async function apiFetch(path, options = {}) {
+      const headers = Object.assign({
+        "X-Api-Key": $("apiKey").value.trim()
+      }, options.headers || {});
+      const res = await fetch(path, { ...options, headers });
+      const text = await res.text();
+      let data = null;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      return { ok: res.ok, status: res.status, data };
+    }
+
+    async function checkStatus() {
+      try {
+        const res = await fetch("/api/status");
+        if (res.ok) {
+          $("serverStatus").className = "badge b-green";
+          $("serverStatus").textContent = "online";
+          return;
+        }
+      } catch {}
+      $("serverStatus").className = "badge b-red";
+      $("serverStatus").textContent = "offline";
+    }
+
+    async function loadPayments() {
+      const { ok, status, data } = await apiFetch("/payments");
+      const tbody = $("paymentsBody");
+      if (!ok) {
+        tbody.innerHTML = `<tr><td colspan="6" class="empty">HTTP ${status}: ${esc(data.error || "Failed to load")}</td></tr>`;
+        return;
+      }
+      if (!Array.isArray(data) || data.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" class="empty">No payments yet.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = data.slice().reverse().map((p) => {
+        let actions = "";
+        if (p.status === "AUTHORIZED") {
+          actions = `
+            <button class="sm success" onclick="doAction('${esc(p.id)}','capture')">Capture</button>
+            <button class="sm warn" onclick="doAction('${esc(p.id)}','cancel')">Cancel</button>
+          `;
+        } else if (p.status === "CAPTURED") {
+          actions = `<button class="sm danger" onclick="doAction('${esc(p.id)}','refund')">Refund</button>`;
+        } else {
+          actions = `<span style="color:var(--muted);font-size:0.78rem;">terminal</span>`;
+        }
+
+        const hist = Array.isArray(p.history) && p.history.length
+          ? `<ul class="history-list">${p.history.map(h => `<li>${esc(h)}</li>`).join("")}</ul>`
+          : "";
+
+        return `
+          <tr>
+            <td class="mono">${esc(p.id)}${hist}</td>
+            <td class="mono">${esc(p.idempotency_key)}</td>
+            <td class="mono">${formatInr(p.amount)}<br><span style="color:var(--muted);font-size:0.74rem;">${p.amount} paise</span></td>
+            <td>${esc(p.description)}</td>
+            <td>${statusBadge(p.status)}</td>
+            <td>${actions}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    async function loadAccounts() {
+      const { ok, data } = await apiFetch("/accounts");
+      const box = $("accountsBox");
+      if (!ok || !Array.isArray(data) || data.length === 0) {
+        box.innerHTML = `<div class="empty">No ledger accounts yet. Capture a payment to see double-entry balances.</div>`;
+        return;
+      }
+      box.innerHTML = data.map((a) => `
+        <div class="account-item">
+          <span class="account-name">${esc(a.account_id)}</span>
+          <div>
+            <span class="account-bal">${formatInr(a.net_balance)}</span>
+            <span class="account-paise">${a.net_balance} paise</span>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    async function loadLedger() {
+      const { ok, data } = await apiFetch("/ledger");
+      const tbody = $("ledgerBody");
+      if (!ok || !Array.isArray(data) || data.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" class="empty">No ledger entries yet.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = data.slice().reverse().map((e) => `
+        <tr>
+          <td class="mono">${esc(e.id)}</td>
+          <td class="mono">${esc(e.transaction_id)}</td>
+          <td class="mono">${esc(e.account_id)}</td>
+          <td><span class="badge ${e.type === "DEBIT" ? "b-amber" : "b-green"}">${esc(e.type)}</span></td>
+          <td class="mono">${formatInr(e.amount)}</td>
+          <td>${esc(e.description)}</td>
+        </tr>
+      `).join("");
+    }
+
+    async function loadReconciliation() {
+      const { ok, data } = await apiFetch("/reconciliation");
+      if (!ok || !data) return;
+      $("reconPayments").textContent = data.total_payments_audited ?? 0;
+      $("reconEntries").textContent = data.total_ledger_entries_audited ?? 0;
+      const badge = $("reconBadge");
+      if (data.status === "HEALTHY") {
+        badge.className = "badge b-green";
+        badge.textContent = "HEALTHY";
+        $("reconDetails").textContent = "All captured payments match double-entry ledger.";
+      } else {
+        badge.className = "badge b-red";
+        badge.textContent = data.status || "DISCREPANCIES";
+        $("reconDetails").textContent = JSON.stringify(data.discrepancies, null, 2);
+      }
+    }
+
+    async function refreshAll() {
+      await Promise.all([checkStatus(), loadPayments(), loadAccounts(), loadLedger(), loadReconciliation()]);
+    }
+
+    window.doAction = async (id, action) => {
+      const res = await apiFetch(`/payments/${id}/${action}`, { method: "POST" });
+      $("apiLog").textContent = `POST /payments/${id}/${action} -> HTTP ${res.status}\n` + JSON.stringify(res.data, null, 2);
+      await refreshAll();
+    };
+
+    $("newIdemBtn").addEventListener("click", () => {
+      $("idemKey").value = newIdemKey();
+    });
+
+    $("refreshBtn").addEventListener("click", refreshAll);
+
+    $("createForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const amountPaise = Math.round(parseFloat($("amountInr").value) * 100);
+      const headers = {
+        "Content-Type": "application/json",
+        "Idempotency-Key": $("idemKey").value.trim()
+      };
+      const mock = $("mockAction").value;
+      if (mock) headers["X-Mock-Action"] = mock;
+
+      const res = await apiFetch("/payments", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          amount: amountPaise,
+          currency: "INR",
+          description: $("description").value.trim() || "Dashboard payment"
+        })
+      });
+
+      $("apiLog").textContent = `POST /payments -> HTTP ${res.status}\n` + JSON.stringify(res.data, null, 2);
+      await refreshAll();
+    });
+
+    $("idemKey").value = newIdemKey();
+    refreshAll();
+  </script>
 </body>
 </html>
