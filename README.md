@@ -1,8 +1,8 @@
 # PayCore — C++ Payment Processing & Ledger Engine
 
-A lightweight, concurrent payment processing, double-entry transaction, and banking simulation engine built in modern C++ on top of a custom Winsock2 `select()` HTTP server.
+A lightweight, concurrent payment processing, double-entry transaction, banking simulation, and financial reconciliation engine built in modern C++ on top of a custom Winsock2 `select()` HTTP server.
 
-Designed from scratch without third-party web frameworks, demonstrating systems programming, networking, financial state consistency, idempotency, double-entry accounting guarantees, and payment provider fault-tolerance.
+Designed from scratch without third-party web frameworks, demonstrating systems programming, low-level networking, financial state consistency, idempotency, double-entry accounting guarantees, disaster recovery, and automated reconciliation.
 
 ---
 
@@ -20,8 +20,11 @@ Designed from scratch without third-party web frameworks, demonstrating systems 
   - Full atomic reversal on refund.
 - **Payment Provider Simulator**: Simulates an upstream banking network with deterministic fault injection via headers (`X-Mock-Action: decline | timeout | fraud | network_error | delay`).
 - **API Key Security Middleware**: Rejects unauthorized access with `401 Unauthorized` via `X-Api-Key` headers.
+- **Atomic Persistence & Disaster Recovery**:
+  - Full state snapshot written atomically via `.tmp` swap (`MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`) to prevent file corruption during sudden server crashes.
+  - Automatic startup hydration restores all payments, idempotency keys, and ledger balances on boot.
+- **Automated Financial Reconciliation Engine**: Cross-references payments against double-entry ledger legs, catching missing postings, amount discrepancies, and orphan entries via `GET /reconciliation`.
 - **Thread-Safe Architecture**: Guarded with Win32 `CRITICAL_SECTION` RAII primitives.
-- **Extensible Request Router**: Dynamic exact and prefix path routing with method matching and keep-alive connection support.
 
 ---
 
@@ -55,13 +58,20 @@ Designed from scratch without third-party web frameworks, demonstrating systems 
                 |            PaymentHandler             |
                 | API Key Auth, Validation, JSON SerDes |
                 +---------------------------------------+
-                    /              |              \
-                   v               v               v
-        +----------------+ +----------------+ +--------------------+
-        |  PaymentStore  | |  Ledger Engine | | Provider Simulator |
-        | State Machine  | |  Double-Entry  | | Bank Authorize /   |
-        |  Idempotency   | |  Debit=Credit  | | Decline / Timeout  |
-        +----------------+ +----------------+ +--------------------+
+                 /            |             \           \
+                v             v              v           v
+        +--------------+ +-------------+ +-----------+ +----------------+
+        | PaymentStore | |Ledger Engine| |  Provider | | Reconciliation |
+        |State Machine | |Double-Entry | | Simulator | | Payment vs     |
+        | Idempotency  | |Debit=Credit | |Mock Bank  | | Ledger Audit   |
+        +--------------+ +-------------+ +-----------+ +----------------+
+                \             /
+                 v           v
+        +-------------------------------+
+        |      PersistenceManager       |
+        | Atomic .tmp Snapshot to Disk  |
+        |  Hydration on Server Boot     |
+        +-------------------------------+
 ```
 
 ---
@@ -83,21 +93,6 @@ Financial transactions follow a strict, uni-directional state flow:
                                         v                               v
                                     [SETTLED]                       [REFUNDED]
 ```
-
----
-
-## 🏦 Payment Provider Simulator (Fault Injection)
-
-Real-world payment gateways encounter network drops, timeouts, and cardholder declines. PayCore includes an internal simulated acquirer controllable via the `X-Mock-Action` header:
-
-| `X-Mock-Action` Value | HTTP Status | Provider Outcome | State Transition |
-|---|---|---|---|
-| *(none / empty)* | `201 Created` | Clean approval (`AUTH_XXXXXX`) | `INITIATED -> PROCESSING -> AUTHORIZED` |
-| `decline` / `insufficient_funds` | `402 Payment Required` | Declines transaction with `INSUFFICIENT_FUNDS` | `INITIATED -> PROCESSING -> FAILED` |
-| `fraud` | `402 Payment Required` | Declines with `SUSPECTED_FRAUD_DECLINE` | `INITIATED -> PROCESSING -> FAILED` |
-| `timeout` | `504 Gateway Timeout` | Simulates bank latency drop | `INITIATED -> PROCESSING -> FAILED` |
-| `network_error` | `502 Bad Gateway` | Simulates dropped socket connection | `INITIATED -> PROCESSING -> FAILED` |
-| `delay` | `201 Created` | Simulates 200ms bank latency before approval | `INITIATED -> PROCESSING -> AUTHORIZED` |
 
 ---
 
@@ -125,7 +120,7 @@ Every settled financial movement records equal and opposite entries across multi
 
 ## 📡 API Endpoints
 
-All payment and accounting endpoints require the header `X-Api-Key: <your-key>`.
+All payment, ledger, and reconciliation endpoints require the header `X-Api-Key: <your-key>`.
 
 ### Payment Endpoints
 | Method | Endpoint | Required Headers | Description |
@@ -145,73 +140,47 @@ All payment and accounting endpoints require the header `X-Api-Key: <your-key>`.
 | `GET` | `/accounts` | `X-Api-Key` | View all active ledger account balances |
 | `GET` | `/accounts/<id>` | `X-Api-Key` | View specific account balance and entry history |
 
+### Reconciliation Endpoint
+| Method | Endpoint | Required Headers | Description |
+|---|---|---|---|
+| `GET` | `/reconciliation` | `X-Api-Key` | Runs automated audit between payments and ledger legs |
+
 ---
 
-## 🛠️ Build and Run
+## 🛠️ Verification & Test Suites
 
-### Run the Standalone Server
-```powershell
-.\server.exe 127.0.0.1 8080
-```
+PayCore includes dedicated, zero-dependency automated verification test suites:
 
-### Run Invariant & Fault-Tolerance Verification Suites
 ```powershell
 # Phase 2 Invariants: State machine, Idempotency, Double-entry arithmetic
 .\tests\test_phase2.exe
 
 # Phase 3 Invariants: Provider simulator, Decline/Timeout/Fraud handling
 .\tests\test_phase3.exe
+
+# Phase 4 Invariants: Atomic Persistence, Crash Hydration, Reconciliation
+.\tests\test_phase4.exe
 ```
 
 ---
 
-## 🧪 Testing with curl
+## 🧪 Quick Test with curl
 
-### 1. Test API Key Protection (Missing Key returns 401)
 ```powershell
-curl.exe -i http://127.0.0.1:8080/payments
-```
+# 1. Start the server
+.\server.exe 127.0.0.1 8080
 
-### 2. Create an Approved Payment
-```powershell
+# 2. Create a ₹500 payment
 curl.exe -i -X POST http://127.0.0.1:8080/payments `
   -H "X-Api-Key: pk_test_live123" `
   -H "Content-Type: application/json" `
-  -H "Idempotency-Key: demo-key-101" `
-  -d '{\"amount\": 50000, \"currency\": \"INR\", \"description\": \"Approved Order\"}'
-```
+  -H "Idempotency-Key: recon-order-01" `
+  -d '{\"amount\": 50000, \"currency\": \"INR\", \"description\": \"Audited Order\"}'
 
-### 3. Test Bank Decline Simulation
-```powershell
-curl.exe -i -X POST http://127.0.0.1:8080/payments `
-  -H "X-Api-Key: pk_test_live123" `
-  -H "Content-Type: application/json" `
-  -H "Idempotency-Key: demo-key-102" `
-  -H "X-Mock-Action: decline" `
-  -d '{\"amount\": 50000, \"currency\": \"INR\", \"description\": \"Declined Order\"}'
-```
-*(Returns `402 Payment Required` with `decline_reason: "INSUFFICIENT_FUNDS"` and payment status marked `FAILED`).*
-
-### 4. Test Bank Timeout Simulation
-```powershell
-curl.exe -i -X POST http://127.0.0.1:8080/payments `
-  -H "X-Api-Key: pk_test_live123" `
-  -H "Content-Type: application/json" `
-  -H "Idempotency-Key: demo-key-103" `
-  -H "X-Mock-Action: timeout" `
-  -d '{\"amount\": 50000, \"currency\": \"INR\", \"description\": \"Timeout Order\"}'
-```
-*(Returns `504 Gateway Timeout` and marks payment `FAILED`).*
-
-### 5. Capture Payment & Inspect Double-Entry Ledger
-```powershell
-# Capture
+# 3. Capture the payment
 curl.exe -i -X POST http://127.0.0.1:8080/payments/<txn_id>/capture `
   -H "X-Api-Key: pk_test_live123"
 
-# View balanced journal
-curl.exe -i http://127.0.0.1:8080/ledger -H "X-Api-Key: pk_test_live123"
-
-# View account balances
-curl.exe -i http://127.0.0.1:8080/accounts -H "X-Api-Key: pk_test_live123"
+# 4. Run Financial Reconciliation Audit
+curl.exe -i http://127.0.0.1:8080/reconciliation -H "X-Api-Key: pk_test_live123"
 ```

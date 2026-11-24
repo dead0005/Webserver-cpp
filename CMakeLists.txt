@@ -16,6 +16,8 @@ add_executable(server
 	PaymentHandler.cpp
 	Ledger.cpp
 	ProviderSimulator.cpp
+	PersistenceManager.cpp
+	Reconciliation.cpp
 )
 
 target_compile_features(server PRIVATE cxx_std_14)

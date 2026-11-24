@@ -131,3 +131,16 @@ std::vector<Payment> PaymentStore::all() const
         result.push_back(kv.second);
     return result;
 }
+
+void PaymentStore::loadFrom(const std::vector<Payment>& payments)
+{
+    CriticalLock guard(lock_);
+    store_.clear();
+    idempotencyIndex_.clear();
+    for (const auto& p : payments)
+    {
+        store_[p.id] = p;
+        if (!p.idempotencyKey.empty())
+            idempotencyIndex_[p.idempotencyKey] = p.id;
+    }
+}

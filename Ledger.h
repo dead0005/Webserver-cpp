@@ -68,6 +68,9 @@ public:
     // Get a list of all distinct accounts currently in the ledger.
     std::vector<std::string> getAccounts() const;
 
+    // Hydrate ledger journal from persistent storage (called on boot)
+    void loadFrom(const std::vector<LedgerEntry>& entries);
+
 private:
     mutable CRITICAL_SECTION                       lock_;
     std::vector<LedgerEntry>                       journal_;            // append-only immutable journal

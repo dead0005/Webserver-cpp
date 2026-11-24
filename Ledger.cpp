@@ -172,3 +172,21 @@ std::vector<std::string> Ledger::getAccounts() const
         accounts.push_back(pair.first);
     return accounts;
 }
+
+void Ledger::loadFrom(const std::vector<LedgerEntry>& entries)
+{
+    CriticalLock guard(lock_);
+    journal_ = entries;
+    accountNetBalances_.clear();
+    postedTransactions_.clear();
+    for (const auto& entry : journal_)
+    {
+        if (entry.type == EntryType::CREDIT)
+            accountNetBalances_[entry.accountId] += entry.amount;
+        else
+            accountNetBalances_[entry.accountId] -= entry.amount;
+
+        if (!entry.transactionId.empty())
+            postedTransactions_[entry.transactionId] = true;
+    }
+}

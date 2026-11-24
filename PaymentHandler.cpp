@@ -1,12 +1,19 @@
 #include "PaymentHandler.h"
 #include "Ledger.h"
 #include "ProviderSimulator.h"
+#include "PersistenceManager.h"
+#include "Reconciliation.h"
 
 #include <cctype>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
 #include <string>
+
+namespace
+{
+    const std::string STATE_FILE_PATH = "data/paycore_state.json";
+}
 
 // Verify API Key from "X-Api-Key" header (e.g. "pk_test_...", "sk_test_...")
 static bool checkApiKey(const HttpRequest& req)
@@ -206,7 +213,7 @@ static std::string makeErrorResponse(int code, const std::string& reason,
 // Required body fields: amount (integer paise), currency (string), description (string)
 // Lifecycle: INITIATED -> PROCESSING -> [AUTHORIZED | FAILED]
 static std::string handleCreatePayment(const HttpRequest& req, const std::string& /*unused*/,
-                                       PaymentStore& store, ProviderSimulator& provider)
+                                       PaymentStore& store, Ledger& ledger, ProviderSimulator& provider)
 {
     // 1. API Key Authentication
     if (!checkApiKey(req))
@@ -259,6 +266,8 @@ static std::string handleCreatePayment(const HttpRequest& req, const std::string
     if (presp.status == ProviderResultStatus::DECLINED)
     {
         store.transition(payment.id, PaymentStatus::FAILED);
+        PersistenceManager::saveState(STATE_FILE_PATH, store, ledger);
+
         Payment failedP;
         store.find(payment.id, failedP);
         std::ostringstream errBody;
@@ -272,6 +281,8 @@ static std::string handleCreatePayment(const HttpRequest& req, const std::string
     else if (presp.status == ProviderResultStatus::TIMEOUT)
     {
         store.transition(payment.id, PaymentStatus::FAILED);
+        PersistenceManager::saveState(STATE_FILE_PATH, store, ledger);
+
         Payment timedOutP;
         store.find(payment.id, timedOutP);
         std::ostringstream errBody;
@@ -285,6 +296,8 @@ static std::string handleCreatePayment(const HttpRequest& req, const std::string
     else if (presp.status == ProviderResultStatus::NETWORK_ERROR)
     {
         store.transition(payment.id, PaymentStatus::FAILED);
+        PersistenceManager::saveState(STATE_FILE_PATH, store, ledger);
+
         Payment netErrP;
         store.find(payment.id, netErrP);
         std::ostringstream errBody;
@@ -303,6 +316,9 @@ static std::string handleCreatePayment(const HttpRequest& req, const std::string
     const std::string body = store.find(payment.id, updated)
                            ? paymentToJson(updated)
                            : paymentToJson(payment);
+
+    // Atomically persist snapshot to disk
+    PersistenceManager::saveState(STATE_FILE_PATH, store, ledger);
 
     return makeJsonResponse(201, "Created", body, req.keepAlive);
 }
@@ -426,7 +442,21 @@ static std::string handlePaymentAction(const HttpRequest& req, const std::string
         ledger.postTransaction("ref_" + id, entries, ledgerErr);
     }
 
+    // Persist snapshot after payment action & ledger posting
+    PersistenceManager::saveState(STATE_FILE_PATH, store, ledger);
+
     return makeJsonResponse(200, "OK", paymentToJson(updated), req.keepAlive);
+}
+
+// GET /reconciliation
+// Returns automated financial reconciliation audit report.
+static std::string handleGetReconciliation(const HttpRequest& req, const PaymentStore& store, const Ledger& ledger)
+{
+    if (!checkApiKey(req))
+        return makeErrorResponse(401, "Unauthorized", "Missing or invalid X-Api-Key header.", req.keepAlive);
+
+    const auto report = ReconciliationEngine::runAudit(store, ledger);
+    return makeJsonResponse(200, "OK", report.toJson(), req.keepAlive);
 }
 
 // GET /ledger
@@ -504,8 +534,8 @@ static std::string handleGetAccount(const HttpRequest& req, const std::string& p
 void registerPaymentRoutes(Router& router, PaymentStore& store, Ledger& ledger, ProviderSimulator& provider)
 {
     // POST /payments  — create a new payment
-    router.post("/payments", [&store, &provider](const HttpRequest& req, const std::string& param) {
-        return handleCreatePayment(req, param, store, provider);
+    router.post("/payments", [&store, &ledger, &provider](const HttpRequest& req, const std::string& param) {
+        return handleCreatePayment(req, param, store, ledger, provider);
     });
 
     // GET /payments  — list all payments
@@ -538,5 +568,12 @@ void registerPaymentRoutes(Router& router, PaymentStore& store, Ledger& ledger, 
     // GET /accounts/<id>  — view specific account balance and entry history
     router.getP("/accounts/", [&ledger](const HttpRequest& req, const std::string& param) {
         return handleGetAccount(req, param, ledger);
+    });
+
+    // --- Reconciliation & Auditing ---
+
+    // GET /reconciliation  — automated financial audit between payments and ledger
+    router.get("/reconciliation", [&store, &ledger](const HttpRequest& req, const std::string& /*param*/) {
+        return handleGetReconciliation(req, store, ledger);
     });
 }

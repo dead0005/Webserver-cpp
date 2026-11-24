@@ -45,6 +45,9 @@ public:
     // List all payments (snapshot copy — safe to call from any thread).
     std::vector<Payment> all() const;
 
+    // Hydrate store from persistent storage (called on boot)
+    void loadFrom(const std::vector<Payment>& payments);
+
 private:
     mutable CRITICAL_SECTION                        lock_;
     std::unordered_map<std::string, Payment>        store_;

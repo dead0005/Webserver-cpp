@@ -3,6 +3,7 @@
 #include "PaymentStore.h"
 #include "Ledger.h"
 #include "ProviderSimulator.h"
+#include "PersistenceManager.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -36,6 +37,9 @@ int main(int argc, char* argv[])
 	Ledger            ledger;
 	ProviderSimulator provider;
 
+	// Disaster recovery: hydrate previous state from disk if present
+	PersistenceManager::loadState("data/paycore_state.json", store, ledger);
+
 	WebServer webServer(bindAddress, port);
 
 	// Wire up payment, accounting, and banking simulation routes
@@ -45,8 +49,10 @@ int main(int argc, char* argv[])
 	std::cout << "Endpoints: POST /payments  GET /payments  GET /payments/<id>\n";
 	std::cout << "           POST /payments/<id>/capture|cancel|refund\n";
 	std::cout << "           GET  /ledger    GET /accounts  GET /accounts/<id>\n";
+	std::cout << "           GET  /reconciliation\n";
 	std::cout << "Auth:      Required 'X-Api-Key' header on all payment/ledger routes\n";
 	std::cout << "Mock Bank: Header 'X-Mock-Action: decline|timeout|network_error|delay'\n";
+	std::cout << "Storage:   Atomic snapshots persisted to data/paycore_state.json\n";
 
 	if (webServer.init() != 0)
 		return 1;
