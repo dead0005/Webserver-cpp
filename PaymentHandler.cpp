@@ -1,11 +1,20 @@
 #include "PaymentHandler.h"
 #include "Ledger.h"
+#include "ProviderSimulator.h"
 
 #include <cctype>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
 #include <string>
+
+// Verify API Key from "X-Api-Key" header (e.g. "pk_test_...", "sk_test_...")
+static bool checkApiKey(const HttpRequest& req)
+{
+    const auto it = req.headers.find("x-api-key");
+    if (it == req.headers.end()) return false;
+    return !it->second.empty();
+}
 
 // ============================================================
 //  Small JSON helpers — no external library needed.
@@ -192,13 +201,18 @@ static std::string makeErrorResponse(int code, const std::string& reason,
 // ============================================================
 
 // POST /payments
-// Required headers: Idempotency-Key
+// Required headers: X-Api-Key, Idempotency-Key
+// Optional headers: X-Mock-Action (decline, timeout, network_error, delay)
 // Required body fields: amount (integer paise), currency (string), description (string)
-// Auto-advances: INITIATED -> PROCESSING -> AUTHORIZED (simulated instant auth)
+// Lifecycle: INITIATED -> PROCESSING -> [AUTHORIZED | FAILED]
 static std::string handleCreatePayment(const HttpRequest& req, const std::string& /*unused*/,
-                                       PaymentStore& store)
+                                       PaymentStore& store, ProviderSimulator& provider)
 {
-    // Idempotency key is mandatory — without it we can't do safe retries.
+    // 1. API Key Authentication
+    if (!checkApiKey(req))
+        return makeErrorResponse(401, "Unauthorized", "Missing or invalid X-Api-Key header.", req.keepAlive);
+
+    // 2. Idempotency Key Validation
     const auto ikey = req.headers.find("idempotency-key");
     if (ikey == req.headers.end() || ikey->second.empty())
         return makeErrorResponse(400, "Bad Request", "Missing Idempotency-Key header.", req.keepAlive);
@@ -228,17 +242,63 @@ static std::string handleCreatePayment(const HttpRequest& req, const std::string
         return makeErrorResponse(409, "Conflict",
             "Idempotency-Key already used with different payment details.", req.keepAlive);
 
-    // For duplicate keys with same payload, return 200 (already processed).
+    // For duplicate keys with same payload, return cached payment
     if (result == PaymentStore::CreateResult::Duplicate)
         return makeJsonResponse(200, "OK", paymentToJson(payment), req.keepAlive);
 
-    // --- Simulated instant authorization ---
-    // Real systems would call an external provider here and await a callback.
-    // We advance the state machine synchronously to demonstrate the full lifecycle.
+    // Advance to PROCESSING while contacting the acquiring bank
     store.transition(payment.id, PaymentStatus::PROCESSING);
+
+    // Check for simulated bank actions from "X-Mock-Action" header
+    const auto mockIt = req.headers.find("x-mock-action");
+    const std::string mockAction = (mockIt != req.headers.end()) ? mockIt->second : "";
+
+    // Contact the Payment Provider Simulator
+    const ProviderResponse presp = provider.authorize(cr.amount, cr.currency, mockAction);
+
+    if (presp.status == ProviderResultStatus::DECLINED)
+    {
+        store.transition(payment.id, PaymentStatus::FAILED);
+        Payment failedP;
+        store.find(payment.id, failedP);
+        std::ostringstream errBody;
+        errBody << "{\n"
+                << "  \"error\": \"Payment declined by issuing bank.\",\n"
+                << "  \"decline_reason\": \"" << jsonEscape(presp.declineReason) << "\",\n"
+                << "  \"payment\": " << paymentToJson(failedP) << "\n"
+                << "}";
+        return makeJsonResponse(402, "Payment Required", errBody.str(), req.keepAlive);
+    }
+    else if (presp.status == ProviderResultStatus::TIMEOUT)
+    {
+        store.transition(payment.id, PaymentStatus::FAILED);
+        Payment timedOutP;
+        store.find(payment.id, timedOutP);
+        std::ostringstream errBody;
+        errBody << "{\n"
+                << "  \"error\": \"Bank gateway timeout.\",\n"
+                << "  \"decline_reason\": \"" << jsonEscape(presp.declineReason) << "\",\n"
+                << "  \"payment\": " << paymentToJson(timedOutP) << "\n"
+                << "}";
+        return makeJsonResponse(504, "Gateway Timeout", errBody.str(), req.keepAlive);
+    }
+    else if (presp.status == ProviderResultStatus::NETWORK_ERROR)
+    {
+        store.transition(payment.id, PaymentStatus::FAILED);
+        Payment netErrP;
+        store.find(payment.id, netErrP);
+        std::ostringstream errBody;
+        errBody << "{\n"
+                << "  \"error\": \"Acquirer connection dropped.\",\n"
+                << "  \"decline_reason\": \"" << jsonEscape(presp.declineReason) << "\",\n"
+                << "  \"payment\": " << paymentToJson(netErrP) << "\n"
+                << "}";
+        return makeJsonResponse(502, "Bad Gateway", errBody.str(), req.keepAlive);
+    }
+
+    // Bank Authorization Approved -> Transition to AUTHORIZED
     store.transition(payment.id, PaymentStatus::AUTHORIZED);
 
-    // Fetch the final state after transitions.
     Payment updated;
     const std::string body = store.find(payment.id, updated)
                            ? paymentToJson(updated)
@@ -252,6 +312,9 @@ static std::string handleCreatePayment(const HttpRequest& req, const std::string
 static std::string handleListPayments(const HttpRequest& req, const std::string& /*unused*/,
                                       PaymentStore& store)
 {
+    if (!checkApiKey(req))
+        return makeErrorResponse(401, "Unauthorized", "Missing or invalid X-Api-Key header.", req.keepAlive);
+
     const auto payments = store.all();
     std::ostringstream j;
     j << "[\n";
@@ -268,6 +331,9 @@ static std::string handleListPayments(const HttpRequest& req, const std::string&
 static std::string handleGetPayment(const HttpRequest& req, const std::string& pathParam,
                                     PaymentStore& store)
 {
+    if (!checkApiKey(req))
+        return makeErrorResponse(401, "Unauthorized", "Missing or invalid X-Api-Key header.", req.keepAlive);
+
     if (pathParam.empty())
         return makeErrorResponse(400, "Bad Request", "Missing payment ID in path.", req.keepAlive);
 
@@ -281,8 +347,12 @@ static std::string handleGetPayment(const HttpRequest& req, const std::string& p
 // POST /payments/<id>/capture  or  POST /payments/<id>/cancel  or  POST /payments/<id>/refund
 // pathParam is everything after "/payments/" — e.g. "txn_123_abc456/capture"
 static std::string handlePaymentAction(const HttpRequest& req, const std::string& pathParam,
-                                       PaymentStore& store, Ledger& ledger)
+                                       PaymentStore& store, Ledger& ledger, ProviderSimulator& provider)
 {
+    // API Key Authentication
+    if (!checkApiKey(req))
+        return makeErrorResponse(401, "Unauthorized", "Missing or invalid X-Api-Key header.", req.keepAlive);
+
     // Split pathParam into  id  /  action
     const std::size_t slash = pathParam.find('/');
     if (slash == std::string::npos)
@@ -323,6 +393,8 @@ static std::string handlePaymentAction(const HttpRequest& req, const std::string
     // Invariant: sum(Debits) == sum(Credits)
     if (action == "capture")
     {
+        provider.capture("AUTH_OK", updated.amount);
+
         // Platform fee: 2% take-rate (200 bps)
         const int64_t fee = (updated.amount * 2) / 100;
         const int64_t merchantSettlement = updated.amount - fee;
@@ -338,6 +410,8 @@ static std::string handlePaymentAction(const HttpRequest& req, const std::string
     }
     else if (action == "refund")
     {
+        provider.refund("AUTH_OK", updated.amount);
+
         // Full reversal of capture: return customer funds, reverse merchant & fee credits
         const int64_t fee = (updated.amount * 2) / 100;
         const int64_t merchantSettlement = updated.amount - fee;
@@ -359,6 +433,9 @@ static std::string handlePaymentAction(const HttpRequest& req, const std::string
 // Returns complete immutable double-entry journal entries.
 static std::string handleListLedger(const HttpRequest& req, Ledger& ledger)
 {
+    if (!checkApiKey(req))
+        return makeErrorResponse(401, "Unauthorized", "Missing or invalid X-Api-Key header.", req.keepAlive);
+
     const auto entries = ledger.getAllEntries();
     std::ostringstream j;
     j << "[\n";
@@ -374,6 +451,9 @@ static std::string handleListLedger(const HttpRequest& req, Ledger& ledger)
 // Returns all active ledger accounts and their current net balances.
 static std::string handleListAccounts(const HttpRequest& req, Ledger& ledger)
 {
+    if (!checkApiKey(req))
+        return makeErrorResponse(401, "Unauthorized", "Missing or invalid X-Api-Key header.", req.keepAlive);
+
     const auto accounts = ledger.getAccounts();
     std::ostringstream j;
     j << "[\n";
@@ -394,6 +474,9 @@ static std::string handleListAccounts(const HttpRequest& req, Ledger& ledger)
 // Returns balance and transaction entry history for a specific account.
 static std::string handleGetAccount(const HttpRequest& req, const std::string& pathParam, Ledger& ledger)
 {
+    if (!checkApiKey(req))
+        return makeErrorResponse(401, "Unauthorized", "Missing or invalid X-Api-Key header.", req.keepAlive);
+
     if (pathParam.empty())
         return makeErrorResponse(400, "Bad Request", "Missing account ID in path.", req.keepAlive);
 
@@ -418,11 +501,11 @@ static std::string handleGetAccount(const HttpRequest& req, const std::string& p
 //  Route registration — called once from main()
 // ============================================================
 
-void registerPaymentRoutes(Router& router, PaymentStore& store, Ledger& ledger)
+void registerPaymentRoutes(Router& router, PaymentStore& store, Ledger& ledger, ProviderSimulator& provider)
 {
     // POST /payments  — create a new payment
-    router.post("/payments", [&store](const HttpRequest& req, const std::string& param) {
-        return handleCreatePayment(req, param, store);
+    router.post("/payments", [&store, &provider](const HttpRequest& req, const std::string& param) {
+        return handleCreatePayment(req, param, store, provider);
     });
 
     // GET /payments  — list all payments
@@ -436,8 +519,8 @@ void registerPaymentRoutes(Router& router, PaymentStore& store, Ledger& ledger)
     });
 
     // POST /payments/<id>/capture|cancel|refund  — lifecycle actions + ledger posting
-    router.postP("/payments/", [&store, &ledger](const HttpRequest& req, const std::string& param) {
-        return handlePaymentAction(req, param, store, ledger);
+    router.postP("/payments/", [&store, &ledger, &provider](const HttpRequest& req, const std::string& param) {
+        return handlePaymentAction(req, param, store, ledger, provider);
     });
 
     // --- Double-Entry Ledger & Account Routes ---

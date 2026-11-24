@@ -15,6 +15,7 @@ add_executable(server
 	PaymentStore.cpp
 	PaymentHandler.cpp
 	Ledger.cpp
+	ProviderSimulator.cpp
 )
 
 target_compile_features(server PRIVATE cxx_std_14)

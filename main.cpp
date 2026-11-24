@@ -2,6 +2,7 @@
 #include "PaymentHandler.h"
 #include "PaymentStore.h"
 #include "Ledger.h"
+#include "ProviderSimulator.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -30,20 +31,22 @@ int main(int argc, char* argv[])
 		port = static_cast<int>(parsedPort);
 	}
 
-	// In-memory payment store and double-entry ledger.
-	// Both outlive the webServer.
-	PaymentStore store;
-	Ledger ledger;
+	// Core engine components: store, ledger, and banking simulator
+	PaymentStore      store;
+	Ledger            ledger;
+	ProviderSimulator provider;
 
 	WebServer webServer(bindAddress, port);
 
-	// Wire up payment and accounting routes onto the server's router.
-	registerPaymentRoutes(webServer.router(), store, ledger);
+	// Wire up payment, accounting, and banking simulation routes
+	registerPaymentRoutes(webServer.router(), store, ledger, provider);
 
 	std::cout << "PayCore starting on " << bindAddress << ":" << port << "\n";
 	std::cout << "Endpoints: POST /payments  GET /payments  GET /payments/<id>\n";
 	std::cout << "           POST /payments/<id>/capture|cancel|refund\n";
 	std::cout << "           GET  /ledger    GET /accounts  GET /accounts/<id>\n";
+	std::cout << "Auth:      Required 'X-Api-Key' header on all payment/ledger routes\n";
+	std::cout << "Mock Bank: Header 'X-Mock-Action: decline|timeout|network_error|delay'\n";
 
 	if (webServer.init() != 0)
 		return 1;
