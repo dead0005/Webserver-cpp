@@ -10,9 +10,13 @@ add_executable(server
 	main.cpp
 	TcpListener.cpp
 	WebServer.cpp
+	Router.cpp
+	Payment.cpp
+	PaymentStore.cpp
+	PaymentHandler.cpp
 )
 
-target_compile_features(server PRIVATE cxx_std_17)
+target_compile_features(server PRIVATE cxx_std_14)
 target_link_libraries(server PRIVATE ws2_32)
 
 if(MSVC)

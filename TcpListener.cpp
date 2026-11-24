@@ -1,167 +1,318 @@
 #include "TcpListener.h"
+
+#include <algorithm>
 #include <iostream>
-#include <string>
-#include <sstream>
+#include <limits>
+#include <utility>
+#include <vector>
+
+namespace
+{
+	volatile LONG shutdownRequested = 0;
+
+	BOOL WINAPI handleConsoleControl(DWORD controlType)
+	{
+		if (controlType == CTRL_C_EVENT ||
+			controlType == CTRL_BREAK_EVENT ||
+			controlType == CTRL_CLOSE_EVENT ||
+			controlType == CTRL_SHUTDOWN_EVENT)
+		{
+			InterlockedExchange(&shutdownRequested, 1);
+			return TRUE;
+		}
+
+		return FALSE;
+	}
+}
+
+TcpListener::TcpListener(std::string ipAddress, int port)
+	: m_ipAddress(std::move(ipAddress)),
+	  m_port(port),
+	  m_socket(INVALID_SOCKET),
+	  m_winsockInitialized(false)
+{
+	FD_ZERO(&m_master);
+}
+
+TcpListener::~TcpListener()
+{
+	closeAllSockets();
+	cleanupWinsock();
+}
 
 int TcpListener::init()
 {
-	// Initialze winsock
-	WSADATA wsData;
-	WORD ver = MAKEWORD(2, 2);
-
-	int wsOk = WSAStartup(ver, &wsData);
-	if (wsOk != 0)
+	if (m_socket != INVALID_SOCKET)
 	{
-		return wsOk;
+		std::cerr << "init() has already succeeded for this listener.\n";
+		return WSAEALREADY;
 	}
 
-	// Create a socket
-	m_socket = socket(AF_INET, SOCK_STREAM, 0);
+	WSADATA wsData{};
+	const int startupResult = WSAStartup(MAKEWORD(2, 2), &wsData);
+	if (startupResult != 0)
+	{
+		std::cerr << "WSAStartup failed with error " << startupResult << ".\n";
+		return startupResult;
+	}
+	m_winsockInitialized = true;
+
+	m_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (m_socket == INVALID_SOCKET)
 	{
-		return WSAGetLastError();
+		const int error = WSAGetLastError();
+		std::cerr << "socket() failed with error " << error << ".\n";
+		cleanupWinsock();
+		return error;
 	}
 
-	// Bind the ip address and port to a socket
-	sockaddr_in hint;
-	hint.sin_family = AF_INET;
-	hint.sin_port = htons(m_port);
-	hint.sin_addr.s_addr = inet_addr(m_ipAddress);
-
-	if (bind(m_socket, (sockaddr*)&hint, sizeof(hint)) == SOCKET_ERROR)
+	BOOL reuseAddress = TRUE;
+	if (setsockopt(m_socket, SOL_SOCKET, SO_REUSEADDR,
+		reinterpret_cast<const char*>(&reuseAddress), sizeof(reuseAddress)) == SOCKET_ERROR)
 	{
-		return WSAGetLastError();
+		const int error = WSAGetLastError();
+		std::cerr << "setsockopt(SO_REUSEADDR) failed with error " << error << ".\n";
+		closeAllSockets();
+		cleanupWinsock();
+		return error;
 	}
 
-	// Tell Winsock the socket is for listening 
+	sockaddr_in address{};
+	address.sin_family = AF_INET;
+	std::string addressText = m_ipAddress;
+	int addressLength = static_cast<int>(sizeof(address));
+	if (addressText.empty())
+	{
+		std::cerr << "Invalid IPv4 address: " << m_ipAddress << ".\n";
+		closeAllSockets();
+		cleanupWinsock();
+		return WSAEINVAL;
+	}
+
+	if (WSAStringToAddressA(&addressText[0], AF_INET, nullptr,
+		reinterpret_cast<sockaddr*>(&address), &addressLength) == SOCKET_ERROR)
+	{
+		const int error = WSAGetLastError();
+		std::cerr << "Invalid IPv4 address: " << m_ipAddress
+			<< " (error " << error << ").\n";
+		closeAllSockets();
+		cleanupWinsock();
+		return error;
+	}
+	address.sin_family = AF_INET;
+	address.sin_port = htons(static_cast<u_short>(m_port));
+
+	if (bind(m_socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == SOCKET_ERROR)
+	{
+		const int error = WSAGetLastError();
+		std::cerr << "bind() failed with error " << error << ".\n";
+		closeAllSockets();
+		cleanupWinsock();
+		return error;
+	}
+
 	if (listen(m_socket, SOMAXCONN) == SOCKET_ERROR)
 	{
-		return WSAGetLastError();
+		const int error = WSAGetLastError();
+		std::cerr << "listen() failed with error " << error << ".\n";
+		closeAllSockets();
+		cleanupWinsock();
+		return error;
 	}
 
-	// Create the master file descriptor set and zero it
 	FD_ZERO(&m_master);
-
-	// Add our first socket that we're interested in interacting with; the listening socket!
-	// It's important that this socket is added for our server or else we won't 'hear' incoming
-	// connections 
 	FD_SET(m_socket, &m_master);
 
+	std::cout << "Listening on http://" << m_ipAddress << ':' << m_port << '\n'
+		<< "Press Ctrl+C to stop.\n";
 	return 0;
 }
 
 int TcpListener::run()
 {
-	// this will be changed by the \quit command (see below, bonus not in video!)
-	bool running = true;
-
-	while (running)
+	if (m_socket == INVALID_SOCKET)
 	{
-		// Make a copy of the master file descriptor set, this is SUPER important because
-		// the call to select() is _DESTRUCTIVE_. The copy only contains the sockets that
-		// are accepting inbound connection requests OR messages. 
+		std::cerr << "Cannot run before init() succeeds.\n";
+		return WSAEINVAL;
+	}
 
-		// E.g. You have a server and it's master file descriptor set contains 5 items;
-		// the listening socket and four clients. When you pass this set into select(), 
-		// only the sockets that are interacting with the server are returned. Let's say
-		// only one client is sending a message at that time. The contents of 'copy' will
-		// be one socket. You will have LOST all the other sockets.
+	InterlockedExchange(&shutdownRequested, 0);
+	if (!SetConsoleCtrlHandler(handleConsoleControl, TRUE))
+	{
+		const DWORD error = GetLastError();
+		std::cerr << "Could not install the console shutdown handler (error "
+			<< error << ").\n";
+		return static_cast<int>(error);
+	}
 
-		// SO MAKE A COPY OF THE MASTER LIST TO PASS INTO select() !!!
+	int result = 0;
+	const auto idleTimeout = std::chrono::seconds(30);
 
-		fd_set copy = m_master;
-
-		// See who's talking to us
-		int socketCount = select(0, &copy, nullptr, nullptr, nullptr);
-
-		// Loop through all the current connections / potential connect
-		for (int i = 0; i < socketCount; i++)
+	while (InterlockedCompareExchange(&shutdownRequested, 0, 0) == 0)
+	{
+		fd_set readable = m_master;
+		timeval timeout{};
+		timeout.tv_sec = 1;
+		const int readyCount = select(0, &readable, nullptr, nullptr, &timeout);
+		if (readyCount == SOCKET_ERROR)
 		{
-			// Makes things easy for us doing this assignment
-			SOCKET sock = copy.fd_array[i];
+			if (InterlockedCompareExchange(&shutdownRequested, 0, 0) != 0)
+				break;
 
-			// Is it an inbound communication?
-			if (sock == m_socket)
+			result = WSAGetLastError();
+			std::cerr << "select() failed with error " << result << ".\n";
+			break;
+		}
+
+		if (readyCount > 0)
+		{
+			for (int index = 0; index < readyCount; ++index)
 			{
-				// Accept a new connection
-				SOCKET client = accept(m_socket, nullptr, nullptr);
-
-				// Add the new connection to the list of connected clients
-				FD_SET(client, &m_master);
-
-				onClientConnected(client);
-			}
-			else // It's an inbound message
-			{
-				char buf[4096];
-				ZeroMemory(buf, 4096);
-
-				// Receive message
-				int bytesIn = recv(sock, buf, 4096, 0);
-				if (bytesIn <= 0)
+				const SOCKET readySocket = readable.fd_array[index];
+				if (readySocket == m_socket)
 				{
-					// Drop the client
-					onClientDisconnected(sock);
-					closesocket(sock);
-					FD_CLR(sock, &m_master);
+					const SOCKET client = accept(m_socket, nullptr, nullptr);
+					if (client == INVALID_SOCKET)
+					{
+						const int error = WSAGetLastError();
+						std::cerr << "accept() failed with error " << error << ".\n";
+						continue;
+					}
+
+					if (m_master.fd_count >= FD_SETSIZE)
+					{
+						std::cerr << "Connection limit reached; rejecting client.\n";
+						closesocket(client);
+						continue;
+					}
+
+					const DWORD sendTimeoutMs = 5000;
+					if (setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
+						reinterpret_cast<const char*>(&sendTimeoutMs),
+						sizeof(sendTimeoutMs)) == SOCKET_ERROR)
+					{
+						std::cerr << "Could not set client send timeout; closing client.\n";
+						closesocket(client);
+						continue;
+					}
+
+					FD_SET(client, &m_master);
+					m_lastActivity[client] = std::chrono::steady_clock::now();
+					onClientConnected(client);
 				}
 				else
 				{
-					onMessageReceived(sock, buf, bytesIn);
+					char buffer[4096];
+					const int bytesReceived = recv(
+						readySocket, buffer, static_cast<int>(sizeof(buffer)), 0);
+
+					if (bytesReceived <= 0)
+					{
+						if (bytesReceived == SOCKET_ERROR)
+						{
+							std::cerr << "recv() failed with error "
+								<< WSAGetLastError() << ".\n";
+						}
+						closeClient(readySocket);
+						continue;
+					}
+
+					m_lastActivity[readySocket] = std::chrono::steady_clock::now();
+					onMessageReceived(readySocket, buffer, bytesReceived);
 				}
 			}
 		}
-	}
 
-	// Remove the listening socket from the master file descriptor set and close it
-	// to prevent anyone else trying to connect.
-	FD_CLR(m_socket, &m_master);
-	closesocket(m_socket);
-
-	while (m_master.fd_count > 0)
-	{
-		// Get the socket number
-		SOCKET sock = m_master.fd_array[0];
-
-		// Remove it from the master file list and close the socket
-		FD_CLR(sock, &m_master);
-		closesocket(sock);
-	}
-
-	// Cleanup winsock
-	WSACleanup();
-	return 0;
-}
-
-
-void TcpListener::sendToClient(int clientSocket, const char* msg, int length)
-{
-	send(clientSocket, msg, length, 0);
-}
-
-void TcpListener::broadcastToClients(int sendingClient, const char* msg, int length)
-{
-	for (u_int i = 0; i < m_master.fd_count; i++)
-	{
-		SOCKET outSock = m_master.fd_array[i];
-		if (outSock != m_socket && outSock != sendingClient)
+		const auto now = std::chrono::steady_clock::now();
+		std::vector<SOCKET> expiredClients;
+		for (const auto& client : m_lastActivity)
 		{
-			sendToClient(outSock, msg, length);
+			if (now - client.second > idleTimeout)
+				expiredClients.push_back(client.first);
+		}
+
+		for (const SOCKET client : expiredClients)
+		{
+			std::cerr << "Closing idle client connection.\n";
+			closeClient(client);
 		}
 	}
+
+	SetConsoleCtrlHandler(handleConsoleControl, FALSE);
+	closeAllSockets();
+	cleanupWinsock();
+	return result;
 }
 
-void TcpListener::onClientConnected(int clientSocket)
+bool TcpListener::sendToClient(SOCKET clientSocket, const std::string& message)
 {
+	std::size_t totalSent = 0;
+	while (totalSent < message.size())
+	{
+		const std::size_t remaining = message.size() - totalSent;
+		const int chunkSize = static_cast<int>(
+			(std::min)(remaining, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+		const int sent = send(
+			clientSocket, message.data() + totalSent, chunkSize, 0);
 
+		if (sent == SOCKET_ERROR || sent == 0)
+		{
+			std::cerr << "send() failed with error "
+				<< (sent == SOCKET_ERROR ? WSAGetLastError() : 0) << ".\n";
+			return false;
+		}
+
+		totalSent += static_cast<std::size_t>(sent);
+	}
+
+	return true;
 }
 
-void TcpListener::onClientDisconnected(int clientSocket)
+void TcpListener::closeClient(SOCKET clientSocket)
 {
+	if (FD_ISSET(clientSocket, &m_master))
+	{
+		onClientDisconnected(clientSocket);
+		FD_CLR(clientSocket, &m_master);
+	}
 
+	m_lastActivity.erase(clientSocket);
+	closesocket(clientSocket);
 }
 
-void TcpListener::onMessageReceived(int clientSocket, const char* msg, int length)
+void TcpListener::closeAllSockets()
 {
+	while (m_master.fd_count > 0)
+	{
+		const SOCKET socketToClose = m_master.fd_array[0];
+		if (socketToClose != m_socket)
+			onClientDisconnected(socketToClose);
 
+		FD_CLR(socketToClose, &m_master);
+		closesocket(socketToClose);
+		m_lastActivity.erase(socketToClose);
+	}
+
+	m_socket = INVALID_SOCKET;
+}
+
+void TcpListener::cleanupWinsock()
+{
+	if (m_winsockInitialized)
+	{
+		WSACleanup();
+		m_winsockInitialized = false;
+	}
+}
+
+void TcpListener::onClientConnected(SOCKET)
+{
+}
+
+void TcpListener::onClientDisconnected(SOCKET)
+{
+}
+
+void TcpListener::onMessageReceived(SOCKET, const char*, int)
+{
 }

@@ -4,45 +4,45 @@
 #define _WIN32_WINNT 0x0600
 #endif
 
-#include <WS2tcpip.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 
-#pragma comment (lib, "ws2_32.lib")
+#include <chrono>
+#include <map>
+#include <string>
+
+#ifdef _MSC_VER
+#pragma comment(lib, "ws2_32.lib")
+#endif
 
 class TcpListener
 {
-
 public:
+	TcpListener(std::string ipAddress, int port);
+	virtual ~TcpListener();
 
-	TcpListener(const char* ipAddress, int port) :
-		m_ipAddress(ipAddress), m_port(port) { }
+	TcpListener(const TcpListener&) = delete;
+	TcpListener& operator=(const TcpListener&) = delete;
 
-	// Initialize the listener
 	int init();
-
-	// Run the listener
 	int run();
 
 protected:
+	virtual void onClientConnected(SOCKET clientSocket);
+	virtual void onClientDisconnected(SOCKET clientSocket);
+	virtual void onMessageReceived(SOCKET clientSocket, const char* message, int length);
 
-	// Handler for client connections
-	virtual void onClientConnected(int clientSocket);
-
-	// Handler for client disconnections
-	virtual void onClientDisconnected(int clientSocket);
-
-	// Handler for when a message is received from the client
-	virtual void onMessageReceived(int clientSocket, const char* msg, int length);
-
-	// Send a message to a client
-	void sendToClient(int clientSocket, const char* msg, int length);
-
-	// Broadcast a message from a client
-	void broadcastToClients(int sendingClient, const char* msg, int length);
+	bool sendToClient(SOCKET clientSocket, const std::string& message);
+	void closeClient(SOCKET clientSocket);
 
 private:
+	void closeAllSockets();
+	void cleanupWinsock();
 
-	const char*		m_ipAddress;	// IP Address server will run on
-	int				m_port;			// Port # for the web service
-	int				m_socket;		// Internal FD for the listening socket
-	fd_set			m_master;		// Master file descriptor set
+	std::string m_ipAddress;
+	int m_port;
+	SOCKET m_socket;
+	fd_set m_master;
+	std::map<SOCKET, std::chrono::steady_clock::time_point> m_lastActivity;
+	bool m_winsockInitialized;
 };
