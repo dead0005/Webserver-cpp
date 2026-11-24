@@ -1,4 +1,5 @@
 #include "PaymentHandler.h"
+#include "Ledger.h"
 
 #include <cctype>
 #include <ctime>
@@ -126,6 +127,23 @@ static std::string paymentToJson(const Payment& p)
         j << "\"" << jsonEscape(p.history[i]) << "\"";
     }
     j << "]\n}";
+    return j.str();
+}
+
+// Serialize a LedgerEntry to a JSON object string.
+static std::string ledgerEntryToJson(const LedgerEntry& e)
+{
+    std::ostringstream j;
+    j << "{\n";
+    j << "  \"id\": \""             << jsonEscape(e.id)            << "\",\n";
+    j << "  \"transaction_id\": \"" << jsonEscape(e.transactionId) << "\",\n";
+    j << "  \"account_id\": \""     << jsonEscape(e.accountId)     << "\",\n";
+    j << "  \"type\": \""           << entryTypeToString(e.type)   << "\",\n";
+    j << "  \"amount\": "           << e.amount                    << ",\n";
+    j << "  \"currency\": \""       << jsonEscape(e.currency)      << "\",\n";
+    j << "  \"description\": \""    << jsonEscape(e.description)   << "\",\n";
+    j << "  \"created_at\": \""     << jsonEscape(e.createdAt)     << "\"\n";
+    j << "}";
     return j.str();
 }
 
@@ -263,7 +281,7 @@ static std::string handleGetPayment(const HttpRequest& req, const std::string& p
 // POST /payments/<id>/capture  or  POST /payments/<id>/cancel  or  POST /payments/<id>/refund
 // pathParam is everything after "/payments/" — e.g. "txn_123_abc456/capture"
 static std::string handlePaymentAction(const HttpRequest& req, const std::string& pathParam,
-                                       PaymentStore& store)
+                                       PaymentStore& store, Ledger& ledger)
 {
     // Split pathParam into  id  /  action
     const std::size_t slash = pathParam.find('/');
@@ -300,14 +318,107 @@ static std::string handlePaymentAction(const HttpRequest& req, const std::string
     if (!store.find(id, updated))
         return makeErrorResponse(500, "Internal Server Error", "State updated but payment lost.", req.keepAlive);
 
+    // --- Double-Entry Ledger Posting ---
+    // When a payment is captured or refunded, we atomically post multi-legged ledger entries.
+    // Invariant: sum(Debits) == sum(Credits)
+    if (action == "capture")
+    {
+        // Platform fee: 2% take-rate (200 bps)
+        const int64_t fee = (updated.amount * 2) / 100;
+        const int64_t merchantSettlement = updated.amount - fee;
+
+        std::vector<LedgerEntry> entries;
+        entries.push_back({ "", id, "escrow:customer",    EntryType::DEBIT,  updated.amount,     updated.currency, "Release customer escrow hold", "" });
+        entries.push_back({ "", id, "merchant:settlement", EntryType::CREDIT, merchantSettlement, updated.currency, "Merchant settlement credit",  "" });
+        if (fee > 0)
+            entries.push_back({ "", id, "platform:fee",        EntryType::CREDIT, fee,                updated.currency, "2% platform processing fee",  "" });
+
+        std::string ledgerErr;
+        ledger.postTransaction("cap_" + id, entries, ledgerErr);
+    }
+    else if (action == "refund")
+    {
+        // Full reversal of capture: return customer funds, reverse merchant & fee credits
+        const int64_t fee = (updated.amount * 2) / 100;
+        const int64_t merchantSettlement = updated.amount - fee;
+
+        std::vector<LedgerEntry> entries;
+        entries.push_back({ "", id, "escrow:customer",    EntryType::CREDIT, updated.amount,     updated.currency, "Customer refund credit",       "" });
+        entries.push_back({ "", id, "merchant:settlement", EntryType::DEBIT,  merchantSettlement, updated.currency, "Reversal of merchant settlement", "" });
+        if (fee > 0)
+            entries.push_back({ "", id, "platform:fee",        EntryType::DEBIT,  fee,                updated.currency, "Reversal of platform fee",       "" });
+
+        std::string ledgerErr;
+        ledger.postTransaction("ref_" + id, entries, ledgerErr);
+    }
+
     return makeJsonResponse(200, "OK", paymentToJson(updated), req.keepAlive);
+}
+
+// GET /ledger
+// Returns complete immutable double-entry journal entries.
+static std::string handleListLedger(const HttpRequest& req, Ledger& ledger)
+{
+    const auto entries = ledger.getAllEntries();
+    std::ostringstream j;
+    j << "[\n";
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (i > 0) j << ",\n";
+        j << ledgerEntryToJson(entries[i]);
+    }
+    j << "\n]";
+    return makeJsonResponse(200, "OK", j.str(), req.keepAlive);
+}
+
+// GET /accounts
+// Returns all active ledger accounts and their current net balances.
+static std::string handleListAccounts(const HttpRequest& req, Ledger& ledger)
+{
+    const auto accounts = ledger.getAccounts();
+    std::ostringstream j;
+    j << "[\n";
+    for (std::size_t i = 0; i < accounts.size(); ++i) {
+        if (i > 0) j << ",\n";
+        const int64_t bal = ledger.getNetBalance(accounts[i]);
+        j << "{\n";
+        j << "  \"account_id\": \"" << jsonEscape(accounts[i]) << "\",\n";
+        j << "  \"net_balance\": "   << bal                     << ",\n";
+        j << "  \"currency\": \"INR\"\n";
+        j << "}";
+    }
+    j << "\n]";
+    return makeJsonResponse(200, "OK", j.str(), req.keepAlive);
+}
+
+// GET /accounts/<id>
+// Returns balance and transaction entry history for a specific account.
+static std::string handleGetAccount(const HttpRequest& req, const std::string& pathParam, Ledger& ledger)
+{
+    if (pathParam.empty())
+        return makeErrorResponse(400, "Bad Request", "Missing account ID in path.", req.keepAlive);
+
+    const int64_t bal = ledger.getNetBalance(pathParam);
+    const auto entries = ledger.getEntriesForAccount(pathParam);
+
+    std::ostringstream j;
+    j << "{\n";
+    j << "  \"account_id\": \"" << jsonEscape(pathParam) << "\",\n";
+    j << "  \"net_balance\": "  << bal                   << ",\n";
+    j << "  \"currency\": \"INR\",\n";
+    j << "  \"entries\": [\n";
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (i > 0) j << ",\n";
+        j << ledgerEntryToJson(entries[i]);
+    }
+    j << "\n  ]\n}";
+    return makeJsonResponse(200, "OK", j.str(), req.keepAlive);
 }
 
 // ============================================================
 //  Route registration — called once from main()
 // ============================================================
 
-void registerPaymentRoutes(Router& router, PaymentStore& store)
+void registerPaymentRoutes(Router& router, PaymentStore& store, Ledger& ledger)
 {
     // POST /payments  — create a new payment
     router.post("/payments", [&store](const HttpRequest& req, const std::string& param) {
@@ -320,13 +431,29 @@ void registerPaymentRoutes(Router& router, PaymentStore& store)
     });
 
     // GET /payments/<id>  — get a specific payment
-    // Registered as a prefix route: anything after "/payments/" is the path param.
     router.getP("/payments/", [&store](const HttpRequest& req, const std::string& param) {
         return handleGetPayment(req, param, store);
     });
 
-    // POST /payments/<id>/capture|cancel|refund  — lifecycle actions
-    router.postP("/payments/", [&store](const HttpRequest& req, const std::string& param) {
-        return handlePaymentAction(req, param, store);
+    // POST /payments/<id>/capture|cancel|refund  — lifecycle actions + ledger posting
+    router.postP("/payments/", [&store, &ledger](const HttpRequest& req, const std::string& param) {
+        return handlePaymentAction(req, param, store, ledger);
+    });
+
+    // --- Double-Entry Ledger & Account Routes ---
+
+    // GET /ledger  — view full immutable audit journal
+    router.get("/ledger", [&ledger](const HttpRequest& req, const std::string& /*param*/) {
+        return handleListLedger(req, ledger);
+    });
+
+    // GET /accounts  — list all account balances
+    router.get("/accounts", [&ledger](const HttpRequest& req, const std::string& /*param*/) {
+        return handleListAccounts(req, ledger);
+    });
+
+    // GET /accounts/<id>  — view specific account balance and entry history
+    router.getP("/accounts/", [&ledger](const HttpRequest& req, const std::string& param) {
+        return handleGetAccount(req, param, ledger);
     });
 }

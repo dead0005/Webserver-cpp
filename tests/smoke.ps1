@@ -210,6 +210,23 @@ try
 		# Cancel on REFUNDED -> 422 Unprocessable Entity
 		$cancelResponse = Send-Request "POST /payments/$txnId/cancel HTTP/1.1`r`nHost: localhost`r`n`r`n"
 		Assert-Response $cancelResponse "422 Unprocessable Entity" "Illegal State Transition"
+
+		# --- Phase 2: Double-Entry Ledger Verification ---
+		# GET /ledger -> should contain journal entries for capture and refund
+		$ledgerResponse = Send-Request "GET /ledger HTTP/1.1`r`nHost: localhost`r`n`r`n"
+		Assert-Response $ledgerResponse "200 OK" "Get Ledger Entries"
+		Assert-Response $ledgerResponse "merchant:settlement" "Ledger has merchant account"
+		Assert-Response $ledgerResponse "escrow:customer" "Ledger has escrow account"
+
+		# GET /accounts -> should list accounts
+		$accountsResponse = Send-Request "GET /accounts HTTP/1.1`r`nHost: localhost`r`n`r`n"
+		Assert-Response $accountsResponse "200 OK" "List Accounts"
+		Assert-Response $accountsResponse "merchant:settlement" "Accounts list has merchant account"
+
+		# GET /accounts/merchant:settlement -> specific account detail
+		$merchantResponse = Send-Request "GET /accounts/merchant:settlement HTTP/1.1`r`nHost: localhost`r`n`r`n"
+		Assert-Response $merchantResponse "200 OK" "Get Merchant Account"
+		Assert-Response $merchantResponse '"account_id": "merchant:settlement"' "Merchant Account ID"
 	}
 	else
 	{

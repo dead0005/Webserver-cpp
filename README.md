@@ -1,8 +1,8 @@
-# PayCore — C++ Payment Processing Engine
+# PayCore — C++ Payment Processing & Ledger Engine
 
-A lightweight, concurrent payment processing and transaction management engine built in C++ on top of a custom Winsock2 `select()` HTTP server.
+A lightweight, concurrent payment processing and double-entry transaction engine built in C++ on top of a custom Winsock2 `select()` HTTP server.
 
-Designed from scratch without third-party web frameworks, demonstrating systems programming, networking, financial state consistency, and idempotency guarantees.
+Designed from scratch without third-party web frameworks, demonstrating systems programming, networking, financial state consistency, idempotency, and double-entry accounting guarantees.
 
 ---
 
@@ -14,7 +14,11 @@ Designed from scratch without third-party web frameworks, demonstrating systems 
 - **Idempotency Engine**: Supports client-supplied `Idempotency-Key` headers.
   - Safe retries return identical cached responses (`200 OK`).
   - Key reuse with conflicting transaction payloads is rejected (`409 Conflict`).
-- **Thread-Safe In-Memory Ledger & Store**: Guarded with Win32 `CRITICAL_SECTION` primitives (compatible with multi-threaded runtimes).
+- **Double-Entry Ledger Engine**: Every financial movement creates balanced multi-legged debits and credits ($\sum \text{Debits} == \sum \text{Credits}$).
+  - Immutable journal ledger.
+  - Automatic 2% platform fee split and merchant settlement crediting on capture.
+  - Full atomic reversal on refund.
+- **Thread-Safe In-Memory Architecture**: Guarded with Win32 `CRITICAL_SECTION` RAII primitives.
 - **Extensible Request Router**: Dynamic exact and prefix path routing with method matching and keep-alive connection support.
 
 ---
@@ -49,13 +53,35 @@ Designed from scratch without third-party web frameworks, demonstrating systems 
                 |            PaymentHandler             |
                 |   Request Validation & JSON SerDes    |
                 +---------------------------------------+
-                                   |
-                                   v
-                +---------------------------------------+
-                |             PaymentStore              |
-                |  State Machine / Idempotency / Mutex  |
-                +---------------------------------------+
+                       |                        |
+                       v                        v
+        +----------------------------+   +----------------------------+
+        |        PaymentStore        |   |       Ledger Engine        |
+        | State Machine / Idempotency|   | Double-Entry Journal Batch |
+        +----------------------------+   +----------------------------+
 ```
+
+---
+
+## ⚖️ Double-Entry Ledger Model
+
+Every settled financial movement records equal and opposite entries across multiple accounts.
+
+### 1. On Payment Capture (e.g. ₹500.00 = 50,000 paise)
+- **Platform Fee (2%)**: 1,000 paise
+- **Merchant Settlement**: 49,000 paise
+- **Journal Entries Posted**:
+  - `DEBIT  escrow:customer    50,000 paise` (releases hold on customer funds)
+  - `CREDIT merchant:settlement 49,000 paise` (credit payable to merchant)
+  - `CREDIT platform:fee         1,000 paise` (credit earned by platform)
+- **Invariant**: $\sum \text{Debits} (50,000) == \sum \text{Credits} (49,000 + 1,000)$ &mdash; **Balanced**.
+
+### 2. On Payment Refund
+- **Journal Entries Posted**:
+  - `CREDIT escrow:customer    50,000 paise` (returns funds to customer)
+  - `DEBIT  merchant:settlement 49,000 paise` (reverses merchant settlement)
+  - `DEBIT  platform:fee         1,000 paise` (reverses platform fee)
+- **Net Balances**: Sums back to zero across all accounts.
 
 ---
 
@@ -89,97 +115,35 @@ Financial transactions follow a strict, uni-directional state flow:
 | `CANCELLED` | *(Terminal)* | Payment voided before capture |
 | `REFUNDED` | *(Terminal)* | Funds returned to payer |
 
-Any illegal transition (e.g. attempting to cancel an already refunded or settled payment) is rejected with `HTTP 422 Unprocessable Entity`.
-
 ---
 
 ## 📡 API Endpoints
 
-### 1. Health Status
-- **Method**: `GET`
-- **Path**: `/api/status`
-- **Response**: `200 OK`
-  ```json
-  {"status":"running","server":"PayCore C++ server"}
-  ```
+### Payment Endpoints
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/status` | Server health check |
+| `POST` | `/payments` | Create payment (requires `Idempotency-Key` header) |
+| `GET` | `/payments` | List all payment transactions |
+| `GET` | `/payments/<id>` | Get specific payment details and history |
+| `POST` | `/payments/<id>/capture` | Capture authorized payment & trigger ledger posting |
+| `POST` | `/payments/<id>/refund` | Refund captured payment & trigger ledger reversal |
+| `POST` | `/payments/<id>/cancel` | Cancel authorized payment |
 
----
-
-### 2. Create Payment (Idempotent)
-- **Method**: `POST`
-- **Path**: `/payments`
-- **Headers**:
-  - `Content-Type: application/json`
-  - `Idempotency-Key: <unique-client-key>` *(Mandatory)*
-- **Request Body**:
-  ```json
-  {
-    "amount": 50000,
-    "currency": "INR",
-    "description": "Invoice #1042"
-  }
-  ```
-- **Response**: `201 Created`
-  ```json
-  {
-    "id": "txn_1795524241_8b5e09",
-    "idempotency_key": "test-key-001",
-    "amount": 50000,
-    "currency": "INR",
-    "description": "Invoice #1042",
-    "status": "AUTHORIZED",
-    "created_at": "2026-11-24T12:44:01Z",
-    "updated_at": "2026-11-24T12:44:01Z",
-    "history": [
-      "INITIATED @ 2026-11-24T12:44:01Z",
-      "PROCESSING @ 2026-11-24T12:44:01Z",
-      "AUTHORIZED @ 2026-11-24T12:44:01Z"
-    ]
-  }
-  ```
-- **Duplicate Key (Identical Body)**: Returns `200 OK` with the original cached record.
-- **Conflicting Key (Different Body)**: Returns `409 Conflict`.
-
----
-
-### 3. List All Payments
-- **Method**: `GET`
-- **Path**: `/payments`
-- **Response**: `200 OK` (JSON Array of all transactions).
-
----
-
-### 4. Get Payment by ID
-- **Method**: `GET`
-- **Path**: `/payments/<transaction_id>`
-- **Response**: `200 OK` or `404 Not Found`.
-
----
-
-### 5. Lifecycle Actions (Capture, Cancel, Refund)
-- **Capture**: `POST /payments/<transaction_id>/capture`
-- **Cancel**: `POST /payments/<transaction_id>/cancel`
-- **Refund**: `POST /payments/<transaction_id>/refund`
-- **Response**: `200 OK` with updated status and audit history, or `422 Unprocessable Entity` if illegal.
+### Ledger & Account Endpoints
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/ledger` | View full immutable audit journal of all debit/credit legs |
+| `GET` | `/accounts` | View all active ledger accounts and their net balances |
+| `GET` | `/accounts/<id>` | View specific account balance and transaction history |
 
 ---
 
 ## 🛠️ Build and Run
 
-### Requirements
-- Windows 10 / 11
-- MinGW GCC (or MSVC)
-- CMake 3.16+ (optional)
-
-### Build with MinGW (Direct GCC Command)
+### MinGW GCC Direct Build
 ```powershell
-g++ -std=c++14 -O2 main.cpp TcpListener.cpp WebServer.cpp Router.cpp Payment.cpp PaymentStore.cpp PaymentHandler.cpp -o server.exe -lws2_32
-```
-
-### Build with CMake
-```powershell
-cmake -B build
-cmake --build build --config Release
+g++ -std=c++14 -O2 main.cpp TcpListener.cpp WebServer.cpp Router.cpp Payment.cpp PaymentStore.cpp PaymentHandler.cpp Ledger.cpp -o server.exe -lws2_32
 ```
 
 ### Start the Server
@@ -189,24 +153,21 @@ cmake --build build --config Release
 
 ---
 
-## 🧪 Testing with curl
+## 🧪 Quick Test with curl
 
 ```powershell
 # 1. Create a payment
 curl.exe -i -X POST http://127.0.0.1:8080/payments `
   -H "Content-Type: application/json" `
-  -H "Idempotency-Key: demo-key-001" `
-  -d '{\"amount\": 25000, \"currency\": \"INR\", \"description\": \"Demo\"}'
+  -H "Idempotency-Key: demo-order-01" `
+  -d '{\"amount\": 50000, \"currency\": \"INR\", \"description\": \"Order #01\"}'
 
-# 2. Test Idempotency (repeating the exact command returns 200 OK with identical payload)
-curl.exe -i -X POST http://127.0.0.1:8080/payments `
-  -H "Content-Type: application/json" `
-  -H "Idempotency-Key: demo-key-001" `
-  -d '{\"amount\": 25000, \"currency\": \"INR\", \"description\": \"Demo\"}'
+# 2. Capture the payment (replace with generated ID)
+curl.exe -i -X POST http://127.0.0.1:8080/payments/<txn_id>/capture
 
-# 3. Capture the transaction
-curl.exe -i -X POST http://127.0.0.1:8080/payments/<transaction_id>/capture
+# 3. View the double-entry ledger journal
+curl.exe -i http://127.0.0.1:8080/ledger
 
-# 4. Refund the transaction
-curl.exe -i -X POST http://127.0.0.1:8080/payments/<transaction_id>/refund
+# 4. View account balances
+curl.exe -i http://127.0.0.1:8080/accounts
 ```
